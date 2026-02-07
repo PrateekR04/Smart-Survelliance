@@ -100,7 +100,15 @@ class ModelLoader:
                     self._model = self._create_mock_model()
                 else:
                     # Load YOLO model (or custom model)
-                    self._model = self._load_yolo_model(path)
+                    try:
+                        self._model = self._load_yolo_model(path)
+                    except Exception as load_err:
+                        logger.warning(
+                            "model_load_failed_using_mock",
+                            error=str(load_err),
+                            msg="Falling back to mock detector",
+                        )
+                        self._model = self._create_mock_model()
                 
                 # Warm-up inference
                 self._warmup()

@@ -7,8 +7,9 @@ All secrets are loaded from environment variables or .env file.
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote_plus
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,12 +28,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
-    # Database
-    database_url: str = Field(
-        ...,
+    # Database - can use either DATABASE_URL or individual params
+    database_url: str | None = Field(
+        default=None,
         description="MySQL connection string with aiomysql driver",
         examples=["mysql+aiomysql://user:pass@localhost:3306/parking_db"],
     )
+    db_host: str = Field(default="127.0.0.1", description="Database host")
+    db_port: int = Field(default=3306, description="Database port")
+    db_user: str = Field(default="root", description="Database username")
+    db_password: str = Field(default="", description="Database password")
+    db_name: str = Field(default="parking_db", description="Database name")
     
     # ML Model
     ml_model_path: str = Field(
@@ -117,11 +123,23 @@ class Settings(BaseSettings):
         description="Enable debug mode",
     )
     
+    @model_validator(mode="after")
+    def build_database_url_if_needed(self) -> "Settings":
+        """Build database URL from individual params if not provided."""
+        if self.database_url is None or self.database_url == "":
+            # URL-encode the password to handle special characters like @
+            encoded_password = quote_plus(self.db_password)
+            self.database_url = (
+                f"mysql+aiomysql://{self.db_user}:{encoded_password}"
+                f"@{self.db_host}:{self.db_port}/{self.db_name}"
+            )
+        return self
+    
     @field_validator("database_url")
     @classmethod
-    def validate_database_url(cls, v: str) -> str:
-        """Ensure database URL uses async MySQL driver."""
-        if not v.startswith("mysql+aiomysql://"):
+    def validate_database_url(cls, v: str | None) -> str | None:
+        """Ensure database URL uses async MySQL driver if provided."""
+        if v is not None and v != "" and not v.startswith("mysql+aiomysql://"):
             raise ValueError(
                 "Database URL must use mysql+aiomysql:// driver for async support"
             )

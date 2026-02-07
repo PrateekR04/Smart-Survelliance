@@ -110,9 +110,25 @@ class YOLOPlateDetector(PlateDetector):
         Returns:
             Raw model output.
         """
+        logger.debug(
+            "running_inference",
+            image_shape=image.shape,
+            confidence_threshold=self.confidence_threshold,
+        )
+        
         if hasattr(model, "predict"):
             # Ultralytics YOLO
-            return model.predict(image, conf=self.confidence_threshold, verbose=False)
+            results = model.predict(image, conf=self.confidence_threshold, verbose=False)
+            # Log raw results for debugging
+            for r in results:
+                if hasattr(r, "boxes"):
+                    logger.debug(
+                        "yolo_raw_results",
+                        num_boxes=len(r.boxes),
+                        boxes=r.boxes.xyxy.cpu().numpy().tolist() if len(r.boxes) > 0 else [],
+                        confs=r.boxes.conf.cpu().numpy().tolist() if len(r.boxes) > 0 else [],
+                    )
+            return results
         elif hasattr(model, "__call__"):
             # Mock or generic callable
             return model(image)
@@ -138,15 +154,39 @@ class YOLOPlateDetector(PlateDetector):
         """
         detections = []
         
-        # Handle ultralytics YOLO output
-        if hasattr(results, "__iter__") and not isinstance(results, (dict, list)):
+        logger.debug(
+            "parse_results_type",
+            results_type=type(results).__name__,
+            is_list=isinstance(results, list),
+        )
+        
+        # Handle ultralytics YOLO output - check for Results type first
+        # Ultralytics returns a list of Results objects
+        try:
             for result in results:
-                if hasattr(result, "boxes"):
-                    for box_data in zip(
-                        result.boxes.xyxy.cpu().numpy(),
-                        result.boxes.conf.cpu().numpy(),
-                    ):
-                        bbox, conf = box_data
+                logger.debug(
+                    "checking_result",
+                    result_type=type(result).__name__,
+                    has_boxes=hasattr(result, "boxes"),
+                )
+                
+                if hasattr(result, "boxes") and len(result.boxes) > 0:
+                    boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+                    confs = result.boxes.conf.cpu().numpy()
+                    
+                    for i in range(len(boxes_xyxy)):
+                        bbox = boxes_xyxy[i]
+                        conf = float(confs[i])
+                        
+                        logger.debug(
+                            "parsing_box",
+                            box_idx=i,
+                            bbox=bbox.tolist(),
+                            conf=conf,
+                            threshold=self.confidence_threshold,
+                            passes_threshold=conf >= self.confidence_threshold,
+                        )
+                        
                         if conf >= self.confidence_threshold:
                             detections.append(
                                 PlateDetectionResult(
@@ -156,16 +196,13 @@ class YOLOPlateDetector(PlateDetector):
                                         x2=int(bbox[2]),
                                         y2=int(bbox[3]),
                                     ),
-                                    confidence=float(conf),
+                                    confidence=conf,
                                     image_width=image_width,
                                     image_height=image_height,
                                 )
                             )
-        
-        # Handle list of dicts (mock detector format)
-        elif isinstance(results, list):
-            for result in results:
-                if isinstance(result, dict):
+                elif isinstance(result, dict):
+                    # Handle mock detector format
                     box = result.get("box") or result.get("bbox")
                     conf = result.get("confidence", 0.0)
                     
@@ -183,6 +220,8 @@ class YOLOPlateDetector(PlateDetector):
                                 image_height=image_height,
                             )
                         )
+        except Exception as e:
+            logger.error("parse_results_error", error=str(e))
         
         logger.debug(
             "detection_complete",

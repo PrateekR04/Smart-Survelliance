@@ -181,6 +181,12 @@ class PlateVerificationUseCase:
         # Normalize and validate text
         normalized_plate = self._normalizer.normalize(ocr_result.raw_text)
         
+        logger.debug(
+            "plate_text_processing",
+            raw_text=ocr_result.raw_text,
+            normalized=normalized_plate,
+        )
+        
         # Check confidence threshold
         final_confidence = self._confidence_evaluator.compute_final_confidence(
             best_detection.confidence,
@@ -194,6 +200,14 @@ class PlateVerificationUseCase:
         
         # Validate plate format
         is_valid_format = self._validator.is_valid(normalized_plate)
+        
+        logger.debug(
+            "plate_validation",
+            normalized=normalized_plate,
+            is_valid_format=is_valid_format,
+            is_confident=is_confident,
+            final_confidence=final_confidence,
+        )
         
         if not is_confident or not is_valid_format:
             logger.warning(
@@ -319,7 +333,13 @@ class PlateVerificationUseCase:
             image_path=image_path,
         )
         
-        await self._access_log_repo.create(access_log)
+        saved_log = await self._access_log_repo.create(access_log)
+        
+        # Create alert for non-authorized access
+        if status != VerificationStatus.AUTHORIZED and saved_log.id is not None:
+            from app.application.alert_service import AlertService
+            alert_service = AlertService(self._session)
+            await alert_service.create_from_access_log(saved_log)
         
         return PlateVerificationResult(
             plate_number=plate_number,
@@ -330,3 +350,4 @@ class PlateVerificationUseCase:
             detection_confidence=detection_confidence,
             ocr_confidence=ocr_confidence,
         )
+

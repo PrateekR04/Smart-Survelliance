@@ -190,11 +190,37 @@ class EasyOCREngine(OCREngine):
         try:
             reader = self._get_reader()
             
-            # Preprocess for better accuracy
-            processed = self.preprocessor.preprocess(image)
+            logger.debug(
+                "ocr_input",
+                image_shape=image.shape,
+            )
             
-            # Run OCR
-            results = reader.readtext(processed)
+            # Try on raw image first (often works better)
+            results = reader.readtext(image)
+            
+            logger.debug(
+                "ocr_raw_results",
+                num_results=len(results),
+                results=[(r[1], r[2]) for r in results] if results else [],
+            )
+            
+            # If raw doesn't work well, try preprocessed
+            if not results or (results and max(r[2] for r in results) < 0.5):
+                processed = self.preprocessor.preprocess(image)
+                processed_results = reader.readtext(processed)
+                
+                logger.debug(
+                    "ocr_preprocessed_results",
+                    num_results=len(processed_results),
+                    results=[(r[1], r[2]) for r in processed_results] if processed_results else [],
+                )
+                
+                # Use whichever has better confidence
+                if processed_results:
+                    raw_max_conf = max((r[2] for r in results), default=0)
+                    processed_max_conf = max((r[2] for r in processed_results), default=0)
+                    if processed_max_conf > raw_max_conf:
+                        results = processed_results
             
             if not results:
                 logger.warning("no_text_detected")
@@ -228,6 +254,131 @@ class EasyOCREngine(OCREngine):
             raise OCRError(f"OCR extraction failed: {e}") from e
 
 
+class PaddleOCREngine(OCREngine):
+    """
+    OCR engine using PaddleOCR with PP-OCRv5.
+    
+    PaddleOCR provides excellent accuracy for license plates
+    with support for 100+ languages.
+    
+    Example:
+        engine = PaddleOCREngine()
+        result = engine.extract_text(plate_image)
+    """
+    
+    _ocr = None
+    _lock = None
+    
+    def __init__(self, use_angle_cls: bool = True, lang: str = "en"):
+        """
+        Initialize PaddleOCR engine.
+        
+        Args:
+            use_angle_cls: Enable angle classification for rotated text.
+            lang: Language for OCR (default: English).
+        """
+        self.use_angle_cls = use_angle_cls
+        self.lang = lang
+        self.preprocessor = ImagePreprocessor()
+        
+        # Lazy initialization
+        if PaddleOCREngine._lock is None:
+            import threading
+            PaddleOCREngine._lock = threading.Lock()
+    
+    def _get_ocr(self):
+        """Lazy-load the PaddleOCR instance."""
+        if PaddleOCREngine._ocr is None:
+            with PaddleOCREngine._lock:
+                if PaddleOCREngine._ocr is None:
+                    try:
+                        from paddleocr import PaddleOCR
+                        PaddleOCREngine._ocr = PaddleOCR(
+                            use_angle_cls=self.use_angle_cls,
+                            lang=self.lang,
+                        )
+                        logger.info("paddleocr_initialized", lang=self.lang)
+                    except ImportError:
+                        raise OCRError(
+                            "PaddleOCR not installed. Run: pip install paddlepaddle paddleocr"
+                        )
+        return PaddleOCREngine._ocr
+    
+    def extract_text(self, image: np.ndarray) -> OCRResult:
+        """
+        Extract text using PaddleOCR.
+        
+        Args:
+            image: Plate image (BGR format).
+        
+        Returns:
+            OCRResult: Extracted text with confidence.
+        """
+        try:
+            ocr = self._get_ocr()
+            
+            logger.debug(
+                "paddleocr_input",
+                image_shape=image.shape,
+            )
+            
+            # PaddleOCR predict() takes image directly
+            result = ocr.predict(image)
+            
+            logger.debug(
+                "paddleocr_raw_result",
+                result_type=type(result).__name__,
+            )
+            
+            # Extract text from result
+            texts = []
+            confidences = []
+            
+            # Handle the result structure from PaddleOCR
+            for res in result:
+                # Access rec_texts and rec_scores attributes
+                if hasattr(res, 'rec_texts') and res.rec_texts:
+                    texts.extend(res.rec_texts)
+                    if hasattr(res, 'rec_scores') and res.rec_scores:
+                        confidences.extend(res.rec_scores)
+                # Fallback: check for dict-like access
+                elif hasattr(res, 'get'):
+                    if 'rec_texts' in res:
+                        texts.extend(res['rec_texts'])
+                    if 'rec_scores' in res:
+                        confidences.extend(res['rec_scores'])
+            
+            logger.debug(
+                "paddleocr_results",
+                num_texts=len(texts),
+                texts=texts,
+                confidences=confidences,
+            )
+            
+            if not texts:
+                logger.warning("no_text_detected_paddle")
+                return OCRResult(raw_text="", confidence=0.0)
+            
+            # Combine all detected text
+            combined_text = "".join(texts)
+            avg_confidence = sum(confidences) / len(confidences) if confidences else 0.8
+            
+            logger.debug(
+                "paddleocr_complete",
+                text=combined_text,
+                confidence=avg_confidence,
+            )
+            
+            return OCRResult(
+                raw_text=combined_text,
+                confidence=avg_confidence,
+            )
+            
+        except Exception as e:
+            logger.error("paddleocr_failed", error=str(e))
+            raise OCRError(f"PaddleOCR extraction failed: {e}") from e
+
+
 class MockOCREngine(OCREngine):
     """
     Mock OCR engine for testing.
@@ -258,12 +409,16 @@ class MockOCREngine(OCREngine):
         )
 
 
-def get_ocr_engine(use_mock: bool = False) -> OCREngine:
+def get_ocr_engine(
+    use_mock: bool = False,
+    engine_type: str = "vlm",
+) -> OCREngine:
     """
     Factory function to get appropriate OCR engine.
     
     Args:
         use_mock: Whether to use mock engine for testing.
+        engine_type: Engine type - "vlm" (PaddleOCR-VL) or "easy" (EasyOCR).
     
     Returns:
         OCREngine: Configured OCR engine instance.
@@ -271,9 +426,26 @@ def get_ocr_engine(use_mock: bool = False) -> OCREngine:
     if use_mock:
         return MockOCREngine()
     
-    try:
-        import easyocr
-        return EasyOCREngine()
-    except ImportError:
-        logger.warning("easyocr_not_available", using_mock=True)
-        return MockOCREngine()
+    # Try PaddleOCR first (default)
+    if engine_type == "vlm" or engine_type == "paddle":
+        try:
+            from paddleocr import PaddleOCR
+            return PaddleOCREngine()
+        except ImportError:
+            logger.warning("paddleocr_not_available", falling_back_to="easyocr")
+            engine_type = "easy"  # Fall back to EasyOCR
+    
+    # EasyOCR fallback
+    if engine_type == "easy":
+        try:
+            import easyocr
+            return EasyOCREngine()
+        except ImportError:
+            logger.warning("easyocr_not_available", using_mock=True)
+            return MockOCREngine()
+    
+    # Unknown engine type, default to PaddleOCR
+    logger.warning("unknown_engine_type", engine_type=engine_type, using="paddleocr")
+    return PaddleOCREngine()
+
+

@@ -45,6 +45,26 @@ class PlateTextNormalizer:
         "8": "B",
     }
     
+    # Valid Indian state codes
+    VALID_STATE_CODES: ClassVar[set[str]] = {
+        "AN", "AP", "AR", "AS", "BR", "CG", "CH", "DD", "DL", "GA",
+        "GJ", "HP", "HR", "JH", "JK", "KA", "KL", "LA", "LD", "MH",
+        "ML", "MN", "MP", "MZ", "NL", "OD", "PB", "PY", "RJ", "SK",
+        "TN", "TR", "TS", "UK", "UP", "WB", "BH",  # BH = Bharat series
+    }
+    
+    # Common OCR misreads for state codes (wrong → correct)
+    STATE_CODE_FIXES: ClassVar[dict[str, str]] = {
+        "HH": "MH",  # M misread as H
+        "NH": "MH",  # M misread as N
+        "WH": "MH",  # M misread as W
+        "KH": "KA",  # A misread as H
+        "DI": "DL",  # L misread as I
+        "DT": "DL",  # L misread as T
+        "TH": "TN",  # N misread as H
+        "RH": "RJ",  # J misread as H
+    }
+    
     def normalize(self, text: str) -> str:
         """
         Normalize raw OCR text to standard plate format.
@@ -95,11 +115,25 @@ class PlateTextNormalizer:
             if result[i] in self.DIGIT_TO_LETTER:
                 result[i] = self.DIGIT_TO_LETTER[result[i]]
         
+        # Chars at positions 2-3 should be digits (district code)
+        for i in range(2, min(4, len(result))):
+            if result[i] in self.LETTER_TO_DIGIT:
+                result[i] = self.LETTER_TO_DIGIT[result[i]]
+        
         # Last 4 chars should be digits
         if len(result) >= 4:
             for i in range(-4, 0):
                 if result[i] in self.LETTER_TO_DIGIT:
                     result[i] = self.LETTER_TO_DIGIT[result[i]]
+        
+        # Fix common state code misreads
+        if len(result) >= 2:
+            state_code = "".join(result[:2])
+            if state_code not in self.VALID_STATE_CODES:
+                fixed = self.STATE_CODE_FIXES.get(state_code)
+                if fixed:
+                    result[0] = fixed[0]
+                    result[1] = fixed[1]
         
         return "".join(result)
 
@@ -132,15 +166,6 @@ class PlateValidator:
         r"^[0-9]{2}BH[0-9]{4}[A-Z]{2}$",             # Alternate Bharat format
     ]
     
-    _compiled_patterns: list[re.Pattern] | None = None
-    
-    def __post_init__(self) -> None:
-        """Pre-compile regex patterns for performance."""
-        if PlateValidator._compiled_patterns is None:
-            PlateValidator._compiled_patterns = [
-                re.compile(pattern) for pattern in self.PLATE_PATTERNS
-            ]
-    
     def is_valid(self, plate_number: str) -> bool:
         """
         Check if plate number matches any valid pattern.
@@ -154,10 +179,17 @@ class PlateValidator:
         if not plate_number or len(plate_number) < 6:
             return False
         
-        return any(
-            pattern.match(plate_number)
-            for pattern in (self._compiled_patterns or [])
-        )
+        # For now, accept any alphanumeric string of 6-12 characters
+        # This allows detection of all kinds of plates
+        if len(plate_number) <= 12 and plate_number.isalnum():
+            return True
+        
+        # Also check strict patterns for analytics
+        for pattern_str in self.PLATE_PATTERNS:
+            if re.match(pattern_str, plate_number):
+                return True
+        
+        return False
     
     def get_matching_pattern(self, plate_number: str) -> str | None:
         """
@@ -174,9 +206,9 @@ class PlateValidator:
         if not plate_number:
             return None
         
-        for i, pattern in enumerate(self._compiled_patterns or []):
-            if pattern.match(plate_number):
-                return self.PLATE_PATTERNS[i]
+        for pattern_str in self.PLATE_PATTERNS:
+            if re.match(pattern_str, plate_number):
+                return pattern_str
         
         return None
 

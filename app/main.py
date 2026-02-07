@@ -158,11 +158,12 @@ def create_app() -> FastAPI:
         # Check database connection
         database_connected = True
         try:
+            from sqlalchemy import text
             from app.infrastructure.db.session import get_session_factory
             session_factory = get_session_factory()
             # Ping database
             async with session_factory() as session:
-                await session.execute("SELECT 1")
+                await session.execute(text("SELECT 1"))
         except Exception:
             database_connected = False
         
@@ -192,6 +193,13 @@ def create_app() -> FastAPI:
     
     # Include API routes
     app.include_router(api_router)
+    
+    # Mount static files for stored images
+    from fastapi.staticfiles import StaticFiles
+    import os
+    storage_path = os.path.join(os.getcwd(), "storage", "images")
+    if os.path.exists(storage_path):
+        app.mount("/storage/images", StaticFiles(directory=storage_path), name="images")
     
     return app
 
